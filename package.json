@@ -5,7 +5,7 @@
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
-    "start:dev": "nodemon app.js --ignore db.json"
+    "start:dev": "node --watch app.js"
   },
   "repository": {
     "type": "git",
@@ -23,13 +23,9 @@
     "node-canvas",
     "telegram"
   ],
-  "devDependencies": {
-    "dotenv": "^6.2.0",
-    "nodemon": "^2.0.15"
-  },
   "dependencies": {
-    "canvas": "^2.8.0",
-    "moment": "^2.29.1",
-    "node-telegram-bot-api": "^0.30.0"
+    "canvas": "^3.2.3",
+    "dayjs": "^1.11.23",
+    "node-telegram-bot-api": "^2.1.0"
   }
 }

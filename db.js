@@ -6,7 +6,7 @@ const dbPath = path.join(__dirname, process.env.DB_PATH || 'db.json');
 let saved;
 
 try {
-  saved = require(dbPath);
+  saved = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
   saved.users = saved.users || {};
 }
 catch (e) {

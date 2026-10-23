@@ -1,30 +1,26 @@
-const TelegramBot = require('node-telegram-bot-api')
+// before the other requires: db.js reads DB_PATH as soon as it loads
+try {
+  process.loadEnvFile();
+}
+catch (e) {
+  if (e.code !== 'ENOENT') throw e;
+}
+
+const { Bot, InputFile } = require('node-telegram-bot-api')
+const { run, startWebhook } = require('node-telegram-bot-api/node')
 const { createCanvas, loadImage, ImageData } = require('canvas')
-const dotenv = require('dotenv');
-const moment = require('moment');
+const dayjs = require('dayjs');
+const crypto = require('crypto');
 const users = require('./db').users;
 const frameData = require('./frames.json');
 const path = require('path');
-
-dotenv.config();
 
 if (!process.env.TELEGRAM_TOKEN) {
   console.error('TELEGRAM_TOKEN environment variable is missing. Can\'t start.')
   process.exit(1)
 }
 
-let bot;
-if (process.env.WEBHOOK_URL) {
-  bot = new TelegramBot(process.env.TELEGRAM_TOKEN, {
-    webHook: {
-      port: process.env.WEBHOOK_PORT || 3000
-    }
-  });
-  bot.setWebHook(process.env.WEBHOOK_URL);
-}
-else {
-  bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
-}
+const bot = new Bot(process.env.TELEGRAM_TOKEN);
 
 const printTemplate = t => {
   let md = frameData[t];
@@ -32,33 +28,35 @@ const printTemplate = t => {
   return `/${t} - recommended size ${md.drawArea[2]}x${md.drawArea[3]}px - Credits: ${md.credits}`;
 }
 
-bot.on('message', async (msg) => {
+bot.on('message', async (ctx, next) => {
+  const msg = ctx.message;
   if (!users[msg.chat.id]) users[msg.chat.id] = {};
   if (msg.document) {
-    return bot.sendMessage(msg.chat.id, 'Send the picture as photo, not as file!').catch(console.log)
+    return ctx.reply('Send the picture as photo, not as file!').catch(console.log)
   }
   if (msg.entities && msg.entities[0].type === 'bot_command') {
     let t = msg.text.split(' ')[0].replace('/', '');
     if (t in frameData) {
       users[msg.chat.id].template = t;
       let { drawArea } = frameData[t];
-      return bot.sendMessage(msg.chat.id, `Great! Your template is now \`${t}\`. Recommended size for this template is *${drawArea[2]}x${drawArea[3]}px.*`, { parse_mode: 'Markdown' }).catch(console.log)
+      return ctx.reply(`Great! Your template is now \`${t}\`. Recommended size for this template is *${drawArea[2]}x${drawArea[3]}px.*`, { parse_mode: 'Markdown' }).catch(console.log)
     }
   }
   if (!msg.photo) {
-    return;
+    // let the text commands below handle it
+    return next();
   }
   let u = users[msg.chat.id];
   if (!u.template || !frameData[u.template]) {
-    return bot.sendMessage(msg.chat.id, 'You have to tell me the template first. Type /templates to see, /template <template> to choose!').catch(console.log)
+    return ctx.reply('You have to tell me the template first. Type /templates to see, /template <template> to choose!').catch(console.log)
   }
   let { width, height, drawArea, cityArea, dateArea, nickArea, font } = frameData[u.template];
   if (!font) font = {};
   if (cityArea && cityArea.length && !u.location) {
-    return bot.sendMessage(msg.chat.id, 'You have to tell me the location first. Type /location <location> to choose!').catch(console.log)
+    return ctx.reply('You have to tell me the location first. Type /location <location> to choose!').catch(console.log)
   }
-  bot.sendChatAction(msg.chat.id, 'upload_photo').catch(console.error)
-  const { file_path } = await bot.getFile(msg.photo[msg.photo.length - 1].file_id)
+  ctx.api.sendChatAction({ chat_id: msg.chat.id, action: 'upload_photo' }).catch(console.error)
+  const { file_path } = await ctx.api.getFile({ file_id: msg.photo[msg.photo.length - 1].file_id })
   const picture = await loadImage(`https://api.telegram.org/file/bot${process.env.TELEGRAM_TOKEN}/${file_path}`);
   let pw = picture.width, ph = picture.height;
   let x = drawArea[0], y = drawArea[1], w = drawArea[2], h = drawArea[2] * ph / pw;
@@ -83,7 +81,7 @@ bot.on('message', async (msg) => {
     finalCtx.fillText(u.location, cityArea[0], cityArea[1], cityArea[2]);
   }
   if (dateArea && dateArea.length) {
-    let date = u.date ? u.date : moment().format('DD/MM/YY');
+    let date = u.date ? u.date : dayjs().format('DD/MM/YY');
     finalCtx.font = dateArea[3] + 'px Arial';
     finalCtx.fillText(date, dateArea[0], dateArea[1], dateArea[2]);
   }
@@ -92,11 +90,14 @@ bot.on('message', async (msg) => {
     finalCtx.font = font.font || `${nickArea[3]}px Arial`;
     finalCtx.fillText(nick, nickArea[0], nickArea[1], nickArea[2]);
   }
-  bot.sendPhoto(msg.chat.id, finalCanvas.toBuffer('image/png', { quality: 1 }))
+  return ctx.api.sendPhoto({
+    chat_id: msg.chat.id,
+    photo: new InputFile(finalCanvas.toBuffer('image/png', { quality: 1 }), { filename: 'biocard.png', contentType: 'image/png' })
+  })
 });
 
-bot.onText(/^\/(start|help)$/, (msg) => {
-  bot.sendMessage(msg.chat.id, `*Use this bot to generate a Biocard.*
+bot.hears(/^\/(start|help)$/, (ctx) => {
+  ctx.reply(`*Use this bot to generate a Biocard.*
   *Available commands:*
     /templates - See all Templates
     /template - See current Template
@@ -109,42 +110,66 @@ bot.onText(/^\/(start|help)$/, (msg) => {
   `, { parse_mode: 'markdown' }).catch(console.log)
 });
 
-bot.onText(/^\/templates$/, (msg, match) => {
-  return bot.sendMessage(msg.chat.id, `*Available templates:* \n  ${Object.keys(frameData).map(printTemplate).join('\n  ')}`, { parse_mode: 'markdown' }).catch(console.log);
+bot.hears(/^\/templates$/, (ctx) => {
+  return ctx.reply(`*Available templates:* \n  ${Object.keys(frameData).map(printTemplate).join('\n  ')}`, { parse_mode: 'markdown' }).catch(console.log);
 });
 
-bot.onText(/^\/template$/, (msg, match) => {
+bot.hears(/^\/template$/, (ctx) => {
+  const msg = ctx.message;
   let curTemplate = users[msg.chat.id].template;
-  if (!curTemplate) return bot.sendMessage(msg.chat.id, 'No template selected. Use /template to see available templates.').catch(console.log);
-  return bot.sendMessage(msg.chat.id, `*Current template:* ${printTemplate(curTemplate)}`, { parse_mode: 'Markdown' }).catch(console.log);
+  if (!curTemplate) return ctx.reply('No template selected. Use /template to see available templates.').catch(console.log);
+  return ctx.reply(`*Current template:* ${printTemplate(curTemplate)}`, { parse_mode: 'Markdown' }).catch(console.log);
 });
 
-bot.onText(/\/location(.*)/, (msg, match) => {
-  let t = match[1].trim();
+bot.hears(/\/location(.*)/, (ctx) => {
+  const msg = ctx.message;
+  let t = ctx.match[1].trim();
   if (!t) {
     if (users[msg.chat.id].location)
-      return bot.sendMessage(msg.chat.id, `Your saved location is ${users[msg.chat.id].location}.`).catch(console.log)
-    return bot.sendMessage(msg.chat.id, `No location set.`).catch(console.log)
+      return ctx.reply(`Your saved location is ${users[msg.chat.id].location}.`).catch(console.log)
+    return ctx.reply(`No location set.`).catch(console.log)
   }
   users[msg.chat.id].location = t;
-  return bot.sendMessage(msg.chat.id, `Great! Your location is now ${t}.`).catch(console.log)
+  return ctx.reply(`Great! Your location is now ${t}.`).catch(console.log)
 });
 
-bot.onText(/\/nick(.*)/, (msg, match) => {
-  let t = match[1].trim();
+bot.hears(/\/nick(.*)/, (ctx) => {
+  const msg = ctx.message;
+  let t = ctx.match[1].trim();
   if (!t) {
-    return bot.sendMessage(msg.chat.id, `Your nickname is ${users[msg.chat.id].nick || msg.from.username}.`).catch(console.log)
+    return ctx.reply(`Your nickname is ${users[msg.chat.id].nick || msg.from.username}.`).catch(console.log)
   }
   users[msg.chat.id].nick = t;
-  return bot.sendMessage(msg.chat.id, `Great! Your nickname is now ${t}.`).catch(console.log)
+  return ctx.reply(`Great! Your nickname is now ${t}.`).catch(console.log)
 });
 
-bot.onText(/\/date(.*)/, (msg, match) => {
-  let t = match[1].trim();
+bot.hears(/\/date(.*)/, (ctx) => {
+  const msg = ctx.message;
+  let t = ctx.match[1].trim();
   if (!t) {
     users[msg.chat.id].date = undefined;
-    return bot.sendMessage(msg.chat.id, 'Date reset to current date.');
+    return ctx.reply('Date reset to current date.');
   }
   users[msg.chat.id].date = t;
-  return bot.sendMessage(msg.chat.id, 'Great! Now send me the picture you want to make the badge with. Use a picture with recommended proportions, otherwise it will get squished.').catch(console.log)
+  return ctx.reply('Great! Now send me the picture you want to make the badge with. Use a picture with recommended proportions, otherwise it will get squished.').catch(console.log)
 });
+
+if (process.env.WEBHOOK_URL) {
+  // regenerated on every start: setWebhook below hands the new one to Telegram
+  const secretToken = crypto.randomBytes(32).toString('hex');
+  startWebhook(bot, {
+    port: Number(process.env.WEBHOOK_PORT) || 3000,
+    path: new URL(process.env.WEBHOOK_URL).pathname,
+    secretToken
+  }).catch(e => {
+    console.error(e);
+    process.exit(1);
+  });
+  bot.api.setWebhook({ url: process.env.WEBHOOK_URL, secret_token: secretToken }).catch(console.error);
+}
+else {
+  run(bot).catch(e => {
+    console.error(e);
+    process.exit(1);
+  });
+}
